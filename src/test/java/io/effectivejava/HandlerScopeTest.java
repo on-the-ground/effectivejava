@@ -31,9 +31,8 @@ class HandlerScopeTest {
     }
 
     @Test
-    void perform_returns_false_when_no_handler_bound() {
-        boolean sent = HandlerScope.perform(LOG, "unbound");
-        assertFalse(sent);
+    void perform_throws_when_no_handler_bound() {
+        assertThrows(IllegalStateException.class, () -> HandlerScope.perform(LOG, "unbound"));
     }
 
     @Test

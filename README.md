@@ -44,7 +44,7 @@ tasks.withType<JavaExec>().configureEach { jvmArgs("--enable-preview") }
 
 | Term | Meaning |
 |---|---|
-| `perform(key, msg)` | Invoke an effect — enqueue `msg` to the handler bound to `key`. Returns `false` if no handler is bound. |
+| `perform(key, msg)` | Invoke an effect — enqueue `msg` to the handler bound to `key`. Throws `IllegalStateException` if no handler is bound. |
 | `bind(key, processor)` | Register a handler for `key` inside the current scope. |
 | `run(body)` | Start all handlers as virtual threads, execute `body` with them discoverable via `ScopedValue`, then tear down. |
 | `Reply<R>` | A one-shot reply channel: `send(result)` on the handler side, `await()` on the performer side. |
@@ -102,12 +102,20 @@ HandlerScope.builder()
 
 Calling `reply.cancel()` instead of waiting unblocks `await()` with a `CancellationException`.
 
-### Graceful no-op outside a scope
+### Fail-loud contract
 
-`perform` returns `false` when no handler is bound, so callers outside any scope are safe:
+`perform` throws `IllegalStateException` when no handler is bound. A missing handler is always a programming error — never silence it:
 
 ```java
-boolean sent = HandlerScope.perform(LOG, "no handler here"); // false, no exception
+// ✗ throws IllegalStateException — must be called inside a bound scope
+HandlerScope.perform(LOG, "no handler here");
+
+// ✓ correct: perform only inside run()
+HandlerScope.builder()
+    .bind(LOG, msg -> System.out.println("[LOG] " + msg))
+    .run(() -> {
+        HandlerScope.perform(LOG, "safe here");
+    });
 ```
 
 ## Lifecycle

@@ -1,10 +1,11 @@
 plugins {
     `java-library`
-    id("com.vanniktech.maven.publish") version "0.30.0"
+    `maven-publish`
+    signing
 }
 
 group = "io.github.joohyung-park"
-version = "0.1.0"
+version = "0.2.0"
 
 java {
     toolchain {
@@ -46,38 +47,57 @@ tasks.test {
     useJUnitPlatform()
 }
 
-mavenPublishing {
-    publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
-    signAllPublications()
-
-    pom {
-        name.set("Effect-ive Java")
-        description.set(
-            "Algebraic Effect Handlers for Java. Bind effect handlers to a dynamic scope so they are " +
-            "discoverable from anywhere in the call stack without threading explicit parameters through " +
-            "every layer. Implements fire-and-forget effects, request-reply effects, and multi-effect " +
-            "composition using Java 25 ScopedValue and StructuredTaskScope (virtual threads)."
-        )
-        inceptionYear.set("2026")
-        url.set("https://github.com/on-the-ground/effectivejava")
-        licenses {
-            license {
-                name.set("MIT License")
-                url.set("https://opensource.org/licenses/MIT")
-                distribution.set("repo")
+publishing {
+    publications {
+        create<MavenPublication>("maven") {
+            from(components["java"])
+            pom {
+                name.set("Effect-ive Java")
+                description.set(
+                    "Algebraic Effect Handlers for Java. Bind effect handlers to a dynamic scope so they are " +
+                    "discoverable from anywhere in the call stack without threading explicit parameters through " +
+                    "every layer. Implements fire-and-forget effects, request-reply effects, and multi-effect " +
+                    "composition using Java 25 ScopedValue and StructuredTaskScope (virtual threads)."
+                )
+                inceptionYear.set("2026")
+                url.set("https://github.com/on-the-ground/effectivejava")
+                licenses {
+                    license {
+                        name.set("MIT License")
+                        url.set("https://opensource.org/licenses/MIT")
+                        distribution.set("repo")
+                    }
+                }
+                developers {
+                    developer {
+                        id.set("joohyung-park")
+                        name.set("Joohyung Park")
+                        url.set("https://github.com/joohyung-park/")
+                    }
+                }
+                scm {
+                    url.set("https://github.com/on-the-ground/effectivejava/")
+                    connection.set("scm:git:git://github.com/on-the-ground/effectivejava.git")
+                    developerConnection.set("scm:git:ssh://git@github.com/on-the-ground/effectivejava.git")
+                }
             }
-        }
-        developers {
-            developer {
-                id.set("joohyung-park")
-                name.set("Joohyung Park")
-                url.set("https://github.com/joohyung-park/")
-            }
-        }
-        scm {
-            url.set("https://github.com/on-the-ground/effectivejava/")
-            connection.set("scm:git:git://github.com/on-the-ground/effectivejava.git")
-            developerConnection.set("scm:git:ssh://git@github.com/on-the-ground/effectivejava.git")
         }
     }
+    repositories {
+        maven {
+            name = "stagingDeploy"
+            url = uri(layout.buildDirectory.dir("staging-deploy"))
+        }
+    }
+}
+
+signing {
+    sign(publishing.publications["maven"])
+}
+
+tasks.register<Zip>("bundleForMavenCentral") {
+    dependsOn("publishMavenPublicationToStagingDeployRepository")
+    from(layout.buildDirectory.dir("staging-deploy"))
+    archiveFileName.set("bundle.zip")
+    destinationDirectory.set(layout.buildDirectory.dir("bundle"))
 }

@@ -16,6 +16,10 @@ import java.util.function.Consumer;
  * Each handler runs as an independent virtual-thread actor with a message queue; the scope
  * tears them all down automatically when the body exits.
  *
+ * <p><strong>Fail-loud contract:</strong> {@link #perform} throws {@link IllegalStateException}
+ * if no handler is bound for the given key. A missing handler is always a programming error —
+ * this library never silences it.
+ *
  * <pre>{@code
  * static final ScopedValue<HandlerScope.Channel<String>> LOG = ScopedValue.newInstance();
  *
@@ -30,6 +34,9 @@ import java.util.function.Consumer;
  * @see HandlerScope#perform(ScopedValue, Object)
  */
 public class HandlerScope {
+
+    /** Not instantiable — all API is static. */
+    private HandlerScope() {}
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -48,10 +55,10 @@ public class HandlerScope {
          * Enqueues {@code message} for the bound handler.
          *
          * @param message the message to deliver
-         * @return {@code true} if the message was enqueued; {@code false} if the handler
-         *         thread was interrupted and can no longer accept messages
+         * @throws IllegalStateException if the handler thread was interrupted and can no
+         *         longer accept messages
          */
-        boolean send(T message);
+        void send(T message);
     }
 
     /**
@@ -61,7 +68,11 @@ public class HandlerScope {
      */
     @FunctionalInterface
     public interface ThrowingRunnable {
-        /** Executes this block, potentially throwing a checked exception. */
+        /**
+         * Executes this block, potentially throwing a checked exception.
+         *
+         * @throws Exception any checked exception the block wishes to propagate
+         */
         void run() throws Exception;
     }
 
@@ -77,17 +88,24 @@ public class HandlerScope {
     /**
      * Performs an effect by sending {@code msg} to the handler bound to {@code key}.
      *
-     * <p>If no handler is bound for {@code key} in the current scope, this method returns
-     * {@code false} without throwing — callers outside any scope are safe to call it.
+     * <p>A missing handler is a programming error. If no handler is bound for {@code key}
+     * in the current scope, this method throws {@link IllegalStateException} immediately.
+     * Always call {@code perform} inside a {@link Builder#run} body that has bound this key.
      *
      * @param <T> the message type
      * @param key  the {@link ScopedValue} key identifying the effect
      * @param msg  the message to deliver
-     * @return {@code true} if the message was accepted by a handler; {@code false} if no
-     *         handler is bound or the handler thread was interrupted
+     * @throws IllegalStateException if no handler is bound for {@code key} in the current scope,
+     *         or if the handler channel has been interrupted and can no longer accept messages
      */
-    public static <T> boolean perform(ScopedValue<Channel<T>> key, T msg) {
-        return key.isBound() && key.get().send(msg);
+    public static <T> void perform(ScopedValue<Channel<T>> key, T msg) {
+        if (!key.isBound()) {
+            throw new IllegalStateException(
+                    "No handler bound for effect key " + key + ". " +
+                    "Ensure perform() is called inside a HandlerScope.builder().run() body " +
+                    "that has bound this key.");
+        }
+        key.get().send(msg);
     }
 
     // ── Builder ───────────────────────────────────────────────────────────────
@@ -99,6 +117,10 @@ public class HandlerScope {
      * a body with those handlers active.
      */
     public static final class Builder {
+
+        /** Use {@link HandlerScope#builder()} to obtain an instance. */
+        private Builder() {}
+
         private final List<Handler<?>> handlers = new ArrayList<>();
 
         /**
@@ -179,10 +201,10 @@ public class HandlerScope {
             return msg -> {
                 try {
                     queue.put(msg);
-                    return true;
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    return false;
+                    throw new IllegalStateException(
+                            "Handler channel interrupted; effect could not be delivered: " + msg);
                 }
             };
         }

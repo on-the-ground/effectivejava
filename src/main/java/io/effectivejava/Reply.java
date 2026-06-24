@@ -23,6 +23,9 @@ import java.util.concurrent.ExecutionException;
  */
 public final class Reply<R> {
 
+    /** Creates a new, unsettled reply channel. */
+    public Reply() {}
+
     private final CompletableFuture<R> future = new CompletableFuture<>();
 
     /**
