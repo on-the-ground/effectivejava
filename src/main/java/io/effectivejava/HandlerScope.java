@@ -1,11 +1,10 @@
 package io.effectivejava;
 
+import io.github.ontheground.daemonizer.PartitionedDaemon;
+
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.StructuredTaskScope;
+import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
@@ -135,7 +134,7 @@ public class HandlerScope {
          * @return this builder, for chaining
          */
         public <T> Builder bind(ScopedValue<Channel<T>> key, Consumer<T> processor) {
-            handlers.add(new Handler<>(new LinkedBlockingQueue<>(), processor, key));
+            handlers.add(new Handler<>(processor, key));
             return this;
         }
 
@@ -143,9 +142,12 @@ public class HandlerScope {
          * Starts all registered handlers as virtual threads, executes {@code body} with them
          * discoverable via {@link ScopedValue}, then tears down the scope.
          *
-         * <p>On exit (normal or exceptional), handler threads are interrupted. Any messages
-         * still in the queue are drained and delivered before the handler threads finish.
-         * The method returns only after all handler threads have finished.
+         * <p>Each handler is backed by a 2-partition {@link PartitionedDaemon}: events are
+         * distributed across partitions by their {@link Object#hashCode}, so a single blocking
+         * event only stalls its own partition while the other continues processing.
+         *
+         * <p>On exit (normal or exceptional), each handler's daemon is closed. Any messages
+         * still in the queue are drained and delivered before the method returns.
          *
          * @param body the block to execute inside the scope
          * @throws Exception any exception thrown by {@code body}
@@ -157,32 +159,36 @@ public class HandlerScope {
                 return;
             }
 
+            List<PartitionedDaemon<?>> daemons = new ArrayList<>(handlers.size());
             ScopedValue.Carrier carrier = null;
 
             for (var h : handlers) {
-                ScopedValue key = h.key();
-                Channel ch = h.channel();
+                Handler raw = h;
+                PartitionedDaemon daemon = new PartitionedDaemon<>(2, Integer.MAX_VALUE,
+                        Objects::hashCode, (msg, t) -> raw.processor().accept(msg));
+                daemons.add(daemon);
+                Channel ch = msg -> {
+                    try {
+                        daemon.pushEvent(msg);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(
+                                "Handler channel interrupted; effect could not be delivered: " + msg);
+                    }
+                };
                 carrier = (carrier == null)
-                        ? ScopedValue.where(key, ch)
-                        : carrier.where(key, ch);
+                        ? ScopedValue.where(raw.key(), ch)
+                        : carrier.where(raw.key(), ch);
             }
 
-            // StructuredTaskScope must be nested inside carrier.call() so that
-            // forked threads do not outlive the ScopedValue bindings they inherit.
+            final var closeable = daemons;
             carrier.call(() -> {
-                var started = new CountDownLatch(handlers.size());
-                var threads = new CopyOnWriteArrayList<Thread>();
-
-                try (var scope = StructuredTaskScope.open(StructuredTaskScope.Joiner.awaitAll())) {
-                    for (var h : handlers) h.forkOn(scope, threads, started);
-                    started.await();  // ensure all handlers are blocking before body runs
-                    try {
-                        body.run();
-                    } finally {
-                        threads.forEach(Thread::interrupt);  // out-of-band stop
-                        try { scope.join(); } catch (InterruptedException ie) {
-                            Thread.currentThread().interrupt();
-                        }
+                try {
+                    body.run();
+                } finally {
+                    for (PartitionedDaemon<?> d : closeable) {
+                        try { d.close(); }
+                        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                     }
                 }
                 return null;
@@ -193,39 +199,7 @@ public class HandlerScope {
     // ── Internals ─────────────────────────────────────────────────────────────
 
     private record Handler<T>(
-            LinkedBlockingQueue<T> queue,
-            Consumer<T> interpret,
+            Consumer<T> processor,
             ScopedValue<Channel<T>> key
-    ) {
-        Channel<T> channel() {
-            return msg -> {
-                try {
-                    queue.put(msg);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    throw new IllegalStateException(
-                            "Handler channel interrupted; effect could not be delivered: " + msg);
-                }
-            };
-        }
-
-        @SuppressWarnings("rawtypes")
-        void forkOn(StructuredTaskScope scope, List<Thread> threads, CountDownLatch started) {
-            scope.fork(() -> {
-                threads.add(Thread.currentThread());
-                started.countDown();
-                try {
-                    while (true) {
-                        interpret.accept(queue.take());
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    List<T> pending = new ArrayList<>();
-                    queue.drainTo(pending);
-                    pending.forEach(interpret::accept);
-                    return null;
-                }
-            });
-        }
-    }
+    ) {}
 }

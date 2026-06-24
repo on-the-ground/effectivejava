@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "io.github.joohyung-park"
-version = "0.2.0"
+version = "0.2.1"
 
 java {
     toolchain {
@@ -15,29 +15,12 @@ java {
     withJavadocJar()
 }
 
-tasks.withType<JavaCompile>().configureEach {
-    options.compilerArgs.add("--enable-preview")
-}
-
-tasks.withType<Test>().configureEach {
-    jvmArgs("--enable-preview")
-}
-
-tasks.withType<JavaExec>().configureEach {
-    jvmArgs("--enable-preview")
-}
-
-tasks.withType<Javadoc>().configureEach {
-    val opts = options as StandardJavadocDocletOptions
-    opts.addBooleanOption("-enable-preview", true)
-    opts.addStringOption("-release", "25")
-}
-
 repositories {
     mavenCentral()
 }
 
 dependencies {
+    implementation("io.github.joohyung-park:daemonizer:0.1.1")
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -57,7 +40,7 @@ publishing {
                     "Algebraic Effect Handlers for Java. Bind effect handlers to a dynamic scope so they are " +
                     "discoverable from anywhere in the call stack without threading explicit parameters through " +
                     "every layer. Implements fire-and-forget effects, request-reply effects, and multi-effect " +
-                    "composition using Java 25 ScopedValue and StructuredTaskScope (virtual threads)."
+                    "composition using Java 25 ScopedValue and virtual-thread daemons."
                 )
                 inceptionYear.set("2026")
                 url.set("https://github.com/on-the-ground/effectivejava")

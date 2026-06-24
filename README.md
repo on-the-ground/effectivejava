@@ -6,38 +6,19 @@ Algebraic Effect Handlers for Java — bind effect handlers to a dynamic scope s
 
 Algebraic Effect Handlers let you separate *what* an effect does from *where* the effect is handled. Code deep in a call stack can `perform` a logging effect, a metrics effect, or a resumable req-reply effect without knowing who handles it. The caller decides, at the boundary, what each effect means.
 
-This library implements that model using Java's `ScopedValue` (ambient context propagation) and `StructuredTaskScope` (virtual-thread lifetime management). Each handler runs as an independent virtual-thread actor with a channel; the scope tears them all down automatically when the body exits.
+This library implements that model using Java's `ScopedValue` (ambient context propagation) and [`daemonizer`](https://github.com/joohyung-park/daemonizer) (virtual-thread lifetime management). Each handler runs as a 2-partition virtual-thread actor: events are distributed across partitions by their `hashCode`, so a single blocking event only stalls its own partition while the other continues processing.
 
 ## Requirements
 
-- Java 25 with `--enable-preview` (uses `ScopedValue` and `StructuredTaskScope`, both preview APIs in Java 25)
+- Java 25 (no `--enable-preview` flag required — `ScopedValue` is a standard API from Java 25)
 
 ## Installation
 
-### JitPack (early access)
-
 ```kotlin
-// settings.gradle.kts
-dependencyResolutionManagement {
-    repositories {
-        maven("https://jitpack.io")
-    }
-}
-
 // build.gradle.kts
 dependencies {
-    implementation("com.github.on-the-ground:effectivejava:0.1.0")
+    implementation("io.github.joohyung-park:effectivejava:0.2.0")
 }
-```
-
-Enable preview in your build:
-
-```kotlin
-tasks.withType<JavaCompile>().configureEach {
-    options.compilerArgs.addAll(listOf("--enable-preview"))
-}
-tasks.withType<Test>().configureEach { jvmArgs("--enable-preview") }
-tasks.withType<JavaExec>().configureEach { jvmArgs("--enable-preview") }
 ```
 
 ## Core concepts
@@ -123,16 +104,14 @@ HandlerScope.builder()
 ```
 HandlerScope.builder()
     .bind(...)
-    .run(body)           ← handlers start as virtual threads
+    .run(body)           ← each handler starts as a 2-partition PartitionedDaemon (2 virtual threads)
         body executes    ← effects are discoverable via ScopedValue
-    ← body exits         ← handlers interrupted out-of-band
+                         ← events routed to partitions by hashCode; one blocking event
+                            only stalls its partition, the other partition runs freely
+    ← body exits         ← all partition daemons are closed
                          ← queued messages are drained and delivered
-                         ← scope.join() waits for all handlers to finish
+                         ← run() returns only after all handlers finish
 ```
-
-## Preview API note
-
-`ScopedValue` and `StructuredTaskScope` are preview APIs. This library will track their stabilization. Once both are finalized (targeted for a future LTS), a stable release will be published to Maven Central.
 
 ## License
 
