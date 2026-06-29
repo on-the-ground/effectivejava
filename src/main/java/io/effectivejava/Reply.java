@@ -52,9 +52,9 @@ public final class Reply<R> {
         try {
             return future.get();
         } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof Error err) throw err;
-            throw (Exception) cause;
+            if (e.getCause() instanceof Error err) throw err;
+            if (e.getCause() instanceof Exception ex) throw ex;
+            throw e;
         }
     }
 }

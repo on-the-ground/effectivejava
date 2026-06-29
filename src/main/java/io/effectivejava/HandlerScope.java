@@ -165,12 +165,12 @@ public class HandlerScope {
             for (var h : handlers) {
                 Handler raw = h;
                 PartitionedDaemon daemon = new PartitionedDaemon<>(2, Integer.MAX_VALUE,
-                        Objects::hashCode, (msg, t) -> raw.processor().accept(msg));
+                        Objects::hashCode, (msg, _) -> raw.processor().accept(msg));
                 daemons.add(daemon);
                 Channel ch = msg -> {
                     try {
                         daemon.pushEvent(msg);
-                    } catch (InterruptedException e) {
+                    } catch (InterruptedException _) {
                         Thread.currentThread().interrupt();
                         throw new IllegalStateException(
                                 "Handler channel interrupted; effect could not be delivered: " + msg);
@@ -188,7 +188,7 @@ public class HandlerScope {
                 } finally {
                     for (PartitionedDaemon<?> d : closeable) {
                         try { d.close(); }
-                        catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                        catch (InterruptedException _) { Thread.currentThread().interrupt(); }
                     }
                 }
                 return null;
