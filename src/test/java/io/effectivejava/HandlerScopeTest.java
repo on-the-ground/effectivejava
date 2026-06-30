@@ -2,10 +2,7 @@ package io.effectivejava;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -14,47 +11,69 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class HandlerScopeTest {
 
-    static final ScopedValue<HandlerScope.Channel<String>> LOG = ScopedValue.newInstance();
+    // ── Effect interfaces ─────────────────────────────────────────────────────
+
+    interface Logger {
+        void log(String key, String message);
+    }
+
+    interface Greeter {
+        String greet(String key, String name);
+    }
+
+    interface IntSink {
+        void accept(Integer key);
+    }
 
     // ── Fire-and-forget ───────────────────────────────────────────────────────
 
     @Test
     void fire_and_forget_handler_receives_messages() throws Exception {
-        List<String> received = Collections.synchronizedList(new ArrayList<>());
+        List<String> received = new CopyOnWriteArrayList<>();
+        CountDownLatch latch = new CountDownLatch(2);
 
         HandlerScope.builder()
-                .bind(LOG, received::add)
+                .bind(Logger.class, () -> (key, msg) -> { received.add(msg); latch.countDown(); })
                 .run(() -> {
-                    HandlerScope.perform(LOG, "hello");
-                    HandlerScope.perform(LOG, "world");
+                    Logger log = HandlerScope.find(Logger.class);
+                    log.log("alice", "hello");
+                    log.log("alice", "world");
+                    latch.await();
                 });
 
-        assertTrue(received.contains("hello"));
-        assertTrue(received.contains("world"));
+        assertEquals(List.of("hello", "world"), received);
     }
 
     @Test
-    void perform_throws_when_no_handler_bound() {
-        assertThrows(IllegalStateException.class, () -> HandlerScope.perform(LOG, "unbound"));
+    void find_throws_when_no_scope_active() {
+        assertThrows(IllegalStateException.class, () -> HandlerScope.find(Logger.class));
     }
 
     @Test
-    void multiple_handler_types_are_each_discoverable() throws Exception {
-        ScopedValue<HandlerScope.Channel<String>> metric = ScopedValue.newInstance();
+    void find_throws_when_effect_not_registered() throws Exception {
+        HandlerScope.builder()
+                .bind(Greeter.class, () -> (key, name) -> "Hi")
+                .run(() -> assertThrows(IllegalStateException.class,
+                        () -> HandlerScope.find(Logger.class)));
+    }
 
-        List<String> logs    = Collections.synchronizedList(new ArrayList<>());
-        List<String> metrics = Collections.synchronizedList(new ArrayList<>());
+    @Test
+    void multiple_effect_types_are_each_discoverable() throws Exception {
+        List<String> logs     = new CopyOnWriteArrayList<>();
+        List<String> greetees = new CopyOnWriteArrayList<>();
+        CountDownLatch latch = new CountDownLatch(2);
 
         HandlerScope.builder()
-                .bind(LOG,    logs::add)
-                .bind(metric, metrics::add)
+                .bind(Logger.class,  () -> (key, msg)  -> { logs.add(msg); latch.countDown(); })
+                .bind(Greeter.class, () -> (key, name) -> { greetees.add(name); latch.countDown(); return name; })
                 .run(() -> {
-                    HandlerScope.perform(LOG,    "user login");
-                    HandlerScope.perform(metric, "latency=42ms");
+                    HandlerScope.find(Logger.class).log("x", "user login");
+                    HandlerScope.find(Greeter.class).greet("x", "alice");
+                    latch.await();
                 });
 
-        assertEquals(List.of("user login"),   logs);
-        assertEquals(List.of("latency=42ms"), metrics);
+        assertEquals(List.of("user login"), logs);
+        assertEquals(List.of("alice"), greetees);
     }
 
     // ── Edge cases ────────────────────────────────────────────────────────────
@@ -67,14 +86,16 @@ class HandlerScopeTest {
     }
 
     @Test
-    void events_drained_even_when_body_throws() {
+    void scope_tears_down_even_when_body_throws() {
         List<String> received = new CopyOnWriteArrayList<>();
+        CountDownLatch latch = new CountDownLatch(1);
 
         assertThrows(RuntimeException.class, () ->
                 HandlerScope.builder()
-                        .bind(LOG, received::add)
+                        .bind(Logger.class, () -> (key, msg) -> { received.add(msg); latch.countDown(); })
                         .run(() -> {
-                            HandlerScope.perform(LOG, "before-throw");
+                            HandlerScope.find(Logger.class).log("x", "before-throw");
+                            latch.await();
                             throw new RuntimeException("boom");
                         }));
 
@@ -85,17 +106,18 @@ class HandlerScopeTest {
 
     @Test
     void events_in_same_partition_are_ordered() throws Exception {
-        ScopedValue<HandlerScope.Channel<Integer>> NUMS = ScopedValue.newInstance();
         List<Integer> received = new CopyOnWriteArrayList<>();
         CountDownLatch latch = new CountDownLatch(3);
 
         HandlerScope.builder()
-                .bind(NUMS, n -> { received.add(n); latch.countDown(); })
+                .bind(IntSink.class, () -> n -> { received.add(n); latch.countDown(); },
+                        HandlerScope.BY_FIRST_ARG, 2, 1024)
                 .run(() -> {
-                    // Integer hashCode == value itself: 0, 2, 4 all → partition 0
-                    HandlerScope.perform(NUMS, 0);
-                    HandlerScope.perform(NUMS, 2);
-                    HandlerScope.perform(NUMS, 4);
+                    IntSink sink = HandlerScope.find(IntSink.class);
+                    // Integer.hashCode() == value; 0, 2, 4 → partition 0 (even % 2)
+                    sink.accept(0);
+                    sink.accept(2);
+                    sink.accept(4);
                     latch.await();
                 });
 
@@ -103,26 +125,26 @@ class HandlerScopeTest {
     }
 
     @Test
-    void blocking_event_in_one_partition_does_not_stall_other_partition() throws Exception {
-        ScopedValue<HandlerScope.Channel<Integer>> NUMS = ScopedValue.newInstance();
+    void blocking_event_in_one_partition_does_not_stall_other() throws Exception {
         CountDownLatch blocker   = new CountDownLatch(1);
         CountDownLatch otherDone = new CountDownLatch(1);
         List<Integer>  received  = new CopyOnWriteArrayList<>();
 
         HandlerScope.builder()
-                .bind(NUMS, n -> {
-                    if (n == 0) {  // partition 0: 의도적으로 블로킹
+                .bind(IntSink.class, () -> n -> {
+                    if (n == 0) {
                         try { blocker.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                    } else {       // partition 1: 블로킹 없이 처리
+                    } else {
                         received.add(n);
                         otherDone.countDown();
                     }
-                })
+                }, HandlerScope.BY_FIRST_ARG, 2, 1024)
                 .run(() -> {
-                    HandlerScope.perform(NUMS, 0);  // partition 0 블로킹 시작
-                    HandlerScope.perform(NUMS, 1);  // partition 1, 독립적으로 진행
-                    otherDone.await();              // partition 1 완료 확인
-                    blocker.countDown();            // partition 0 해제
+                    IntSink sink = HandlerScope.find(IntSink.class);
+                    sink.accept(0);  // partition 0: blocks
+                    sink.accept(1);  // partition 1: proceeds independently
+                    otherDone.await();
+                    blocker.countDown();
                 });
 
         assertTrue(received.contains(1));
@@ -130,30 +152,13 @@ class HandlerScopeTest {
 
     // ── Request-reply ─────────────────────────────────────────────────────────
 
-    record EchoRequest(String text, Reply<String> reply) {}
-
-    static final ScopedValue<HandlerScope.Channel<EchoRequest>> ECHO = ScopedValue.newInstance();
-
     @Test
-    void reply_handler_returns_result_via_send() throws Exception {
+    void non_void_effect_blocks_and_returns_result() throws Exception {
         HandlerScope.builder()
-                .bind(ECHO, req -> req.reply().send(req.text().toUpperCase()))
+                .bind(Greeter.class, () -> (key, name) -> "Hello, " + name + "!")
                 .run(() -> {
-                    var reply = new Reply<String>();
-                    HandlerScope.perform(ECHO, new EchoRequest("hello", reply));
-                    assertEquals("HELLO", reply.await());
-                });
-    }
-
-    @Test
-    void reply_cancel_unblocks_await_with_exception() throws Exception {
-        HandlerScope.builder()
-                .bind(ECHO, req -> { /* never sends */ })
-                .run(() -> {
-                    var reply = new Reply<String>();
-                    HandlerScope.perform(ECHO, new EchoRequest("ignored", reply));
-                    reply.cancel();
-                    assertThrows(CancellationException.class, reply::await);
+                    String result = HandlerScope.find(Greeter.class).greet("bob", "World");
+                    assertEquals("Hello, World!", result);
                 });
     }
 }

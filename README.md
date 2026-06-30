@@ -4,20 +4,20 @@ Algebraic Effect Handlers for Java — bind effect handlers to a dynamic scope s
 
 ## Motivation
 
-Algebraic Effect Handlers let you separate *what* an effect does from *where* the effect is handled. Code deep in a call stack can `perform` a logging effect, a metrics effect, or a resumable req-reply effect without knowing who handles it. The caller decides, at the boundary, what each effect means.
+Algebraic Effect Handlers let you separate *what* an effect does from *where* the effect is handled. Code deep in a call stack can invoke a logging effect, a metrics effect, or a request-reply effect without knowing who handles it. The caller decides, at the boundary, what each effect means.
 
-This library implements that model using Java's `ScopedValue` (ambient context propagation) and [`daemonizer`](https://github.com/joohyung-park/daemonizer) (virtual-thread lifetime management). Each handler runs as a 2-partition virtual-thread actor: events are distributed across partitions by their `hashCode`, so a single blocking event only stalls its own partition while the other continues processing.
+This library implements that model using Java's `ScopedValue` (ambient context propagation) and [`Proxxy`](https://github.com/joohyung-park/proxxy) (partitioned virtual-thread actors). Each handler is backed by a Proxxy proxy: method calls are routed to partition threads by a configurable router function, so the same routing key always reaches the same thread and the same target instance — no synchronization required.
 
 ## Requirements
 
-- Java 25 (no `--enable-preview` flag required — `ScopedValue` is a standard API from Java 25)
+- Java 25+ (`ScopedValue` is a standard API from Java 25)
 
 ## Installation
 
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.github.joohyung-park:effectivejava:0.2.2")
+    implementation("io.github.joohyung-park:effectivejava:0.3.0")
 }
 ```
 
@@ -25,92 +25,107 @@ dependencies {
 
 | Term | Meaning |
 |---|---|
-| `perform(key, msg)` | Invoke an effect — enqueue `msg` to the handler bound to `key`. Throws `IllegalStateException` if no handler is bound. |
-| `bind(key, processor)` | Register a handler for `key` inside the current scope. |
-| `run(body)` | Start all handlers as virtual threads, execute `body` with them discoverable via `ScopedValue`, then tear down. |
-| `Reply<R>` | A one-shot reply channel: `send(result)` on the handler side, `await()` on the performer side. |
+| Effect interface | A plain Java interface whose methods represent effects. No annotations required. |
+| `bind(Type.class, factory)` | Register a handler implementation for an effect type. |
+| `find(Type.class)` | Discover the proxy bound to an effect type in the current scope. |
+| `run(body)` | Start all handlers, execute `body` with them discoverable, then tear down. |
+| Router | A `ToIntBiFunction<Method, Object[]>` that maps a call to a partition. Default: `BY_FIRST_ARG`. |
 
 ## Usage
 
 ### Fire-and-forget effect
 
 ```java
-// Declare an effect key — one per effect type, typically a static field
-static final ScopedValue<HandlerScope.Channel<String>> LOG = ScopedValue.newInstance();
+interface Logger {
+    void log(String userId, String message);
+}
 
 HandlerScope.builder()
-    .bind(LOG, msg -> System.out.println("[LOG] " + msg))
+    .bind(Logger.class, () -> (userId, msg) -> System.out.println("[LOG] " + msg))
     .run(() -> {
-        // anywhere inside this body (including nested calls) can perform the effect
-        HandlerScope.perform(LOG, "application started");
-        HandlerScope.perform(LOG, "processing req");
+        Logger log = HandlerScope.find(Logger.class);
+        log.log("alice", "application started");  // routed to alice's partition thread
+        log.log("alice", "processing req");        // same thread, same Logger instance
+    });
+```
+
+Void methods are fire-and-forget — the caller does not block.
+
+### Request-reply effect
+
+Non-void methods block the caller until the handler returns.
+
+```java
+interface Greeter {
+    String greet(String userId, String name);
+}
+
+HandlerScope.builder()
+    .bind(Greeter.class, () -> (userId, name) -> "Hello, " + name + "!")
+    .run(() -> {
+        String result = HandlerScope.find(Greeter.class).greet("alice", "World");
+        System.out.println(result); // "Hello, World!"
     });
 ```
 
 ### Multiple effect types
 
 ```java
-static final ScopedValue<HandlerScope.Channel<String>> LOG    = ScopedValue.newInstance();
-static final ScopedValue<HandlerScope.Channel<String>> METRIC = ScopedValue.newInstance();
-
 HandlerScope.builder()
-    .bind(LOG,    msg -> System.out.println("[LOG] "    + msg))
-    .bind(METRIC, msg -> System.out.println("[METRIC] " + msg))
+    .bind(Logger.class,  MyLogger::new)
+    .bind(Greeter.class, MyGreeter::new)
     .run(() -> {
-        HandlerScope.perform(LOG,    "user login");
-        HandlerScope.perform(METRIC, "latency=42ms");
+        HandlerScope.find(Logger.class).log("alice", "user login");
+        String greeting = HandlerScope.find(Greeter.class).greet("alice", "World");
     });
 ```
 
-### Request-reply effect
+### Custom router
 
-The performer blocks on `await()` until the handler calls `send()`.
+By default, calls are routed by the first argument's hash code (`BY_FIRST_ARG`). Supply an explicit router for finer control.
 
 ```java
-record EchoRequest(String text, Reply<String> reply) {}
-
-static final ScopedValue<HandlerScope.Channel<EchoRequest>> ECHO = ScopedValue.newInstance();
-
+// Route every call to partition 0 — fully ordered, single-threaded handler
 HandlerScope.builder()
-    .bind(ECHO, req -> req.reply().send(req.text().toUpperCase()))
-    .run(() -> {
-        var reply = new Reply<String>();
-        HandlerScope.perform(ECHO, new EchoRequest("hello", reply));
-        String result = reply.await();  // blocks until handler calls send()
-        System.out.println(result); // "HELLO"
-    });
-```
+    .bind(Logger.class, MyLogger::new, (method, args) -> 0)
+    .run(() -> { ... });
 
-Calling `reply.cancel()` instead of waiting unblocks `await()` with a `CancellationException`.
+// Route by second argument instead of first
+HandlerScope.builder()
+    .bind(Logger.class, MyLogger::new, (method, args) -> args[1].hashCode())
+    .run(() -> { ... });
+```
 
 ### Fail-loud contract
 
-`perform` throws `IllegalStateException` when no handler is bound. A missing handler is always a programming error — never silence it:
+`find` throws `IllegalStateException` when called outside a scope or for an unregistered type. A missing handler is always a programming error — never silence it.
 
 ```java
-// ✗ throws IllegalStateException — must be called inside a bound scope
-HandlerScope.perform(LOG, "no handler here");
+// ✗ throws — no scope active
+HandlerScope.find(Logger.class);
 
-// ✓ correct: perform only inside run()
+// ✗ throws — Logger not bound
 HandlerScope.builder()
-    .bind(LOG, msg -> System.out.println("[LOG] " + msg))
-    .run(() -> {
-        HandlerScope.perform(LOG, "safe here");
-    });
+    .bind(Greeter.class, MyGreeter::new)
+    .run(() -> HandlerScope.find(Logger.class));
+
+// ✓ correct
+HandlerScope.builder()
+    .bind(Logger.class, MyLogger::new)
+    .run(() -> HandlerScope.find(Logger.class).log("alice", "safe here"));
 ```
 
 ## Lifecycle
 
 ```
 HandlerScope.builder()
-    .bind(...)
-    .run(body)           ← each handler starts as a 2-partition PartitionedDaemon (2 virtual threads)
-        body executes    ← effects are discoverable via ScopedValue
-                         ← events routed to partitions by hashCode; one blocking event
-                            only stalls its partition, the other partition runs freely
-    ← body exits         ← all partition daemons are closed
-                         ← queued messages are drained and delivered
-                         ← run() returns only after all handlers finish
+    .bind(Logger.class, MyLogger::new)   ← factory registered, not yet started
+    .run(body)                           ← Proxxy proxy created (2 partition threads per handler)
+        body executes                    ← find() returns the proxy; calls routed by router
+                                         ← same routing key → same thread → same target instance
+    ← body exits (normal or exception)  ← all proxies closed
+                                         ← pending non-void calls complete before shutdown
+                                         ← run() returns only after all handlers finish
 ```
 
 ## License
