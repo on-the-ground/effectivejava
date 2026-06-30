@@ -17,7 +17,7 @@ This library implements that model using Java's `ScopedValue` (ambient context p
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.github.joohyung-park:effectivejava:0.3.0")
+    implementation("io.github.joohyung-park:effectivejava:0.4.0")
 }
 ```
 
@@ -40,7 +40,7 @@ interface Logger {
     void log(String userId, String message);
 }
 
-HandlerScope.builder()
+HandlerScope.open()
     .bind(Logger.class, () -> (userId, msg) -> System.out.println("[LOG] " + msg))
     .run(() -> {
         Logger log = HandlerScope.find(Logger.class);
@@ -60,7 +60,7 @@ interface Greeter {
     String greet(String userId, String name);
 }
 
-HandlerScope.builder()
+HandlerScope.open()
     .bind(Greeter.class, () -> (userId, name) -> "Hello, " + name + "!")
     .run(() -> {
         String result = HandlerScope.find(Greeter.class).greet("alice", "World");
@@ -71,7 +71,7 @@ HandlerScope.builder()
 ### Multiple effect types
 
 ```java
-HandlerScope.builder()
+HandlerScope.open()
     .bind(Logger.class,  MyLogger::new)
     .bind(Greeter.class, MyGreeter::new)
     .run(() -> {
@@ -86,12 +86,12 @@ By default, calls are routed by the first argument's hash code (`BY_FIRST_ARG`).
 
 ```java
 // Route every call to partition 0 — fully ordered, single-threaded handler
-HandlerScope.builder()
+HandlerScope.open()
     .bind(Logger.class, MyLogger::new, (method, args) -> 0)
     .run(() -> { ... });
 
 // Route by second argument instead of first
-HandlerScope.builder()
+HandlerScope.open()
     .bind(Logger.class, MyLogger::new, (method, args) -> args[1].hashCode())
     .run(() -> { ... });
 ```
@@ -105,12 +105,12 @@ HandlerScope.builder()
 HandlerScope.find(Logger.class);
 
 // ✗ throws — Logger not bound
-HandlerScope.builder()
+HandlerScope.open()
     .bind(Greeter.class, MyGreeter::new)
     .run(() -> HandlerScope.find(Logger.class));
 
 // ✓ correct
-HandlerScope.builder()
+HandlerScope.open()
     .bind(Logger.class, MyLogger::new)
     .run(() -> HandlerScope.find(Logger.class).log("alice", "safe here"));
 ```
@@ -118,7 +118,7 @@ HandlerScope.builder()
 ## Lifecycle
 
 ```
-HandlerScope.builder()
+HandlerScope.open()
     .bind(Logger.class, MyLogger::new)   ← factory registered, not yet started
     .run(body)                           ← Proxxy proxy created (2 partition threads per handler)
         body executes                    ← find() returns the proxy; calls routed by router

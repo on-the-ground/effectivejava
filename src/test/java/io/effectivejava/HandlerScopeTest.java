@@ -32,7 +32,7 @@ class HandlerScopeTest {
         List<String> received = new CopyOnWriteArrayList<>();
         CountDownLatch latch = new CountDownLatch(2);
 
-        HandlerScope.builder()
+        HandlerScope.open()
                 .bind(Logger.class, () -> (key, msg) -> { received.add(msg); latch.countDown(); })
                 .run(() -> {
                     Logger log = HandlerScope.find(Logger.class);
@@ -51,7 +51,7 @@ class HandlerScopeTest {
 
     @Test
     void find_throws_when_effect_not_registered() throws Exception {
-        HandlerScope.builder()
+        HandlerScope.open()
                 .bind(Greeter.class, () -> (key, name) -> "Hi")
                 .run(() -> assertThrows(IllegalStateException.class,
                         () -> HandlerScope.find(Logger.class)));
@@ -63,7 +63,7 @@ class HandlerScopeTest {
         List<String> greetees = new CopyOnWriteArrayList<>();
         CountDownLatch latch = new CountDownLatch(2);
 
-        HandlerScope.builder()
+        HandlerScope.open()
                 .bind(Logger.class,  () -> (key, msg)  -> { logs.add(msg); latch.countDown(); })
                 .bind(Greeter.class, () -> (key, name) -> { greetees.add(name); latch.countDown(); return name; })
                 .run(() -> {
@@ -81,7 +81,7 @@ class HandlerScopeTest {
     @Test
     void no_handlers_runs_body_directly() throws Exception {
         AtomicBoolean ran = new AtomicBoolean(false);
-        HandlerScope.builder().run(() -> ran.set(true));
+        HandlerScope.open().run(() -> ran.set(true));
         assertTrue(ran.get());
     }
 
@@ -91,7 +91,7 @@ class HandlerScopeTest {
         CountDownLatch latch = new CountDownLatch(1);
 
         assertThrows(RuntimeException.class, () ->
-                HandlerScope.builder()
+                HandlerScope.open()
                         .bind(Logger.class, () -> (key, msg) -> { received.add(msg); latch.countDown(); })
                         .run(() -> {
                             HandlerScope.find(Logger.class).log("x", "before-throw");
@@ -109,9 +109,9 @@ class HandlerScopeTest {
         List<Integer> received = new CopyOnWriteArrayList<>();
         CountDownLatch latch = new CountDownLatch(3);
 
-        HandlerScope.builder()
+        HandlerScope.open()
                 .bind(IntSink.class, () -> n -> { received.add(n); latch.countDown(); },
-                        HandlerScope.BY_FIRST_ARG, 2, 1024)
+                        HandlerScope.FIRST_ARGUMENT_HASH, 2, 1024)
                 .run(() -> {
                     IntSink sink = HandlerScope.find(IntSink.class);
                     // Integer.hashCode() == value; 0, 2, 4 → partition 0 (even % 2)
@@ -130,7 +130,7 @@ class HandlerScopeTest {
         CountDownLatch otherDone = new CountDownLatch(1);
         List<Integer>  received  = new CopyOnWriteArrayList<>();
 
-        HandlerScope.builder()
+        HandlerScope.open()
                 .bind(IntSink.class, () -> n -> {
                     if (n == 0) {
                         try { blocker.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -138,7 +138,7 @@ class HandlerScopeTest {
                         received.add(n);
                         otherDone.countDown();
                     }
-                }, HandlerScope.BY_FIRST_ARG, 2, 1024)
+                }, HandlerScope.FIRST_ARGUMENT_HASH, 2, 1024)
                 .run(() -> {
                     IntSink sink = HandlerScope.find(IntSink.class);
                     sink.accept(0);  // partition 0: blocks
@@ -154,7 +154,7 @@ class HandlerScopeTest {
 
     @Test
     void non_void_effect_blocks_and_returns_result() throws Exception {
-        HandlerScope.builder()
+        HandlerScope.open()
                 .bind(Greeter.class, () -> (key, name) -> "Hello, " + name + "!")
                 .run(() -> {
                     String result = HandlerScope.find(Greeter.class).greet("bob", "World");

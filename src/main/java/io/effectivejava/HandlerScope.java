@@ -4,7 +4,8 @@ import io.proxxy.Proxxy;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -28,7 +29,7 @@ import java.util.function.ToIntBiFunction;
  *     void log(String userId, String message);
  * }
  *
- * HandlerScope.builder()
+ * HandlerScope.open()
  *     .bind(Logger.class, MyLogger::new)
  *     .run(() -> {
  *         Logger log = HandlerScope.find(Logger.class);
@@ -36,7 +37,7 @@ import java.util.function.ToIntBiFunction;
  *     });
  * }</pre>
  *
- * @see HandlerScope#builder()
+ * @see HandlerScope#open()
  * @see HandlerScope#find(Class)
  */
 public final class HandlerScope {
@@ -46,7 +47,7 @@ public final class HandlerScope {
     private static final ScopedValue<Map<Class<?>, Object>> SCOPE = ScopedValue.newInstance();
 
     /** Routes by the first argument's hash code — the standard affinity-key pattern. */
-    public static final ToIntBiFunction<Method, Object[]> BY_FIRST_ARG =
+    public static final ToIntBiFunction<Method, Object[]> FIRST_ARGUMENT_HASH =
             (method, args) -> args.length == 0 || args[0] == null ? 0 : args[0].hashCode();
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -70,7 +71,7 @@ public final class HandlerScope {
         Objects.requireNonNull(effectType);
         if (!SCOPE.isBound()) {
             throw new IllegalStateException(
-                "No HandlerScope is active. Call find() inside a HandlerScope.builder().run() body.");
+                "No HandlerScope is active. Call find() inside a HandlerScope.open().run() body.");
         }
         T proxy = (T) SCOPE.get().get(effectType);
         if (proxy == null) {
@@ -86,7 +87,7 @@ public final class HandlerScope {
      *
      * @return a fresh builder
      */
-    public static Builder builder() {
+    public static Builder open() {
         return new Builder();
     }
 
@@ -115,8 +116,8 @@ public final class HandlerScope {
         private final List<Entry<?>> entries = new ArrayList<>();
 
         /**
-         * Registers a handler using {@link HandlerScope#BY_FIRST_ARG} routing,
-         * one partition, and a buffer of 1024.
+         * Registers a handler using {@link HandlerScope#FIRST_ARGUMENT_HASH} routing,
+         * two partitions, and a buffer of 1024.
          *
          * @param <T>        the effect interface type
          * @param effectType the interface to proxy
@@ -124,11 +125,11 @@ public final class HandlerScope {
          * @return this builder, for chaining
          */
         public <T> Builder bind(Class<T> effectType, Supplier<T> factory) {
-            return bind(effectType, factory, BY_FIRST_ARG, 2, 1024);
+            return bind(effectType, factory, FIRST_ARGUMENT_HASH, 2, 1024);
         }
 
         /**
-         * Registers a handler with an explicit router, one partition, and a buffer of 1024.
+         * Registers a handler with an explicit router, two partitions, and a buffer of 1024.
          *
          * @param <T>        the effect interface type
          * @param effectType the interface to proxy
@@ -178,14 +179,14 @@ public final class HandlerScope {
                 return;
             }
 
-            Map<Class<?>, Object> map = new HashMap<>();
+            Map<Class<?>, Object> map = new IdentityHashMap<>();
             List<Proxxy.ProxyHandle<?>> handles = new ArrayList<>(entries.size());
 
             for (Entry<?> e : entries) {
                 launch(e, handles, map);
             }
 
-            ScopedValue.where(SCOPE, Map.copyOf(map)).call(() -> {
+            ScopedValue.where(SCOPE, Collections.unmodifiableMap(map)).call(() -> {
                 try {
                     body.run();
                 } finally {
