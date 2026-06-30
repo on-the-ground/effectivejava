@@ -17,7 +17,7 @@ This library implements that model using Java's `ScopedValue` (ambient context p
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.github.joohyung-park:effectivejava:0.4.0")
+    implementation("io.github.joohyung-park:effectivejava:0.4.1")
 }
 ```
 

@@ -3,12 +3,7 @@ package io.effectivejava;
 import io.proxxy.Proxxy;
 
 import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.IdentityHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
+import java.util.*;
 import java.util.function.Supplier;
 import java.util.function.ToIntBiFunction;
 
@@ -46,9 +41,9 @@ public final class HandlerScope {
 
     private static final ScopedValue<Map<Class<?>, Object>> SCOPE = ScopedValue.newInstance();
 
-    /** Routes by the first argument's hash code — the standard affinity-key pattern. */
+    /** Routes by the first argument's hash code — bitwise masked to ensure positivity. */
     public static final ToIntBiFunction<Method, Object[]> FIRST_ARGUMENT_HASH =
-            (method, args) -> args.length == 0 || args[0] == null ? 0 : args[0].hashCode();
+            (method, args) -> args.length == 0 || args[0] == null ? 0 : (args[0].hashCode() & Integer.MAX_VALUE);
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -182,22 +177,35 @@ public final class HandlerScope {
             Map<Class<?>, Object> map = new IdentityHashMap<>();
             List<Proxxy.ProxyHandle<?>> handles = new ArrayList<>(entries.size());
 
-            for (Entry<?> e : entries) {
-                launch(e, handles, map);
-            }
+            Throwable bodyException = null;
+            try {
+                for (Entry<?> e : entries) {
+                    launch(e, handles, map);
+                }
 
-            ScopedValue.where(SCOPE, Collections.unmodifiableMap(map)).call(() -> {
-                try {
+                ScopedValue.where(SCOPE, Collections.unmodifiableMap(map)).call(() -> {
                     body.run();
-                } finally {
-                    for (Proxxy.ProxyHandle<?> h : handles) {
-                        try { h.close(); }
-                        catch (InterruptedException ex) { Thread.currentThread().interrupt(); }
-                        catch (Exception ignored) {}
+                    return null;
+                });
+            } catch (Throwable t) {
+                bodyException = t;
+            } finally {
+                for (Proxxy.ProxyHandle<?> h : handles) {
+                    try {
+                        h.close();
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                        if (bodyException != null) bodyException.addSuppressed(ex);
+                        else bodyException = ex;
+                    } catch (Exception ex) {
+                        if (bodyException != null) bodyException.addSuppressed(ex);
+                        else bodyException = ex;
                     }
                 }
-                return null;
-            });
+            }
+            if (bodyException instanceof RuntimeException re) throw re;
+            if (bodyException instanceof Error err) throw err;
+            if (bodyException instanceof Exception ex) throw ex;
         }
 
         private static <T> void launch(Entry<T> e, List<Proxxy.ProxyHandle<?>> handles, Map<Class<?>, Object> map) {
