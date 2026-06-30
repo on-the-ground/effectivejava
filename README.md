@@ -6,7 +6,7 @@ Algebraic Effect Handlers for Java — bind effect handlers to a dynamic scope s
 
 Algebraic Effect Handlers let you separate *what* an effect does from *where* the effect is handled. Code deep in a call stack can invoke a logging effect, a metrics effect, or a request-reply effect without knowing who handles it. The caller decides, at the boundary, what each effect means.
 
-This library implements that model using Java's `ScopedValue` (ambient context propagation) and [`Proxxy`](https://github.com/joohyung-park/proxxy) (partitioned virtual-thread actors). Each handler is backed by a Proxxy proxy: method calls are routed to partition threads by a configurable router function, so the same routing key always reaches the same thread and the same target instance — no synchronization required.
+This library implements that model using Java's `ScopedValue` (ambient context propagation) and [`Proxxy`](https://github.com/on-the-ground/proxxy) (partitioned virtual-thread actors). Each handler is backed by a Proxxy proxy: method calls are routed to partition threads by a configurable router function, so the same routing key always reaches the same thread and the same target instance — no synchronization required.
 
 ## Requirements
 
