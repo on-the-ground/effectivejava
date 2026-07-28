@@ -17,7 +17,7 @@ This library implements that model using Java's `ScopedValue` (ambient context p
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.github.joohyung-park:effectivejava:0.4.1")
+    implementation("io.github.joohyung-park:effectivejava:0.5.0")
 }
 ```
 
@@ -30,6 +30,7 @@ dependencies {
 | `find(Type.class)` | Discover the proxy bound to an effect type in the current scope. |
 | `run(body)` | Start all handlers, execute `body` with them discoverable, then tear down. |
 | Router | A `ToIntBiFunction<Method, Object[]>` that maps a call to a partition. Default: `BY_FIRST_ARG`. |
+| `@Context(Type.class, ...)` | Declares, next to a method's signature, which effect types it depends on. No runtime behavior on its own — see [Declaring effects with `@Context`](#declaring-effects-with-context). |
 
 ## Usage
 
@@ -114,6 +115,39 @@ HandlerScope.open()
     .bind(Logger.class, MyLogger::new)
     .run(() -> HandlerScope.find(Logger.class).log("alice", "safe here"));
 ```
+
+### Declaring effects with `@Context`
+
+The fail-loud contract only catches a missing handler when `find` actually runs, which can be buried arbitrarily deep in a method body — nothing about a method's signature tells a reader (or a refactor) that it depends on an effect. `@Context` makes that dependency explicit, the way a `throws` clause makes a checked exception explicit:
+
+```java
+@Context(Logger.class)
+void greetLoudly(String name) {
+    HandlerScope.find(Logger.class).log("greet", "hello, " + name);
+}
+```
+
+`@Context` carries no runtime behavior by itself — it's a marker for readers and for tooling. This same artifact also ships `io.effectivejava.checker.RequireContextChecker`, an [Error Prone](https://errorprone.info/) `BugChecker` that enforces it at compile time: it rejects any `HandlerScope.find(X.class)` call, or call to another `@Context`-annotated method, that isn't covered by the enclosing method's own `@Context` or by an inline `HandlerScope.open().bind(X.class, ...).run(...)` block wrapping the call. Coverage is checked per call site, not inferred — a method that transitively depends on an effect through a call chain must declare it itself, same as `throws` propagation.
+
+The checker only recognizes inline, literal `bind(...).run(...)` chains as discharging a requirement — a builder stored in a variable, built conditionally, or invoked via a method reference won't be credited, and the checker will conservatively ask for an explicit `@Context` instead. This is intentional: it can be overly strict, but it never silently lets an uncovered effect through.
+
+#### Enabling the checker
+
+The checker's `error_prone_core` dependency is `compileOnly`, so depending on `effectivejava` normally pulls in none of it — using `@Context` without enabling the checker is valid, it's just inert documentation at that point. To actually enforce it, apply the [`net.ltgt.errorprone`](https://plugins.gradle.org/plugin/net.ltgt.errorprone) Gradle plugin to *your own* build and add this same artifact to the `errorprone` configuration:
+
+```kotlin
+// build.gradle.kts
+plugins {
+    id("net.ltgt.errorprone") version "5.1.0"
+}
+
+dependencies {
+    implementation("io.github.joohyung-park:effectivejava:0.5.0")
+    errorprone("io.github.joohyung-park:effectivejava:0.5.0")
+}
+```
+
+This is always opt-in — publishing a jar can't force a compiler plugin onto anyone else's build. Enforcement only exists in codebases that have deliberately wired it in; this repository's own build doesn't apply the checker to itself (`HandlerScope` implements `find`, it doesn't call it), so there's nothing here for it to check yet.
 
 ## Lifecycle
 

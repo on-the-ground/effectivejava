@@ -32,8 +32,21 @@ import java.util.function.ToIntBiFunction;
  *     });
  * }</pre>
  *
+ * <p>The fail-loud contract only catches a missing handler at the moment {@link #find} actually
+ * runs, which can be arbitrarily deep in a call stack and easy to miss on inspection. {@link
+ * Context @Context} lets a method declare which effect types it depends on next to its
+ * signature, the way a {@code throws} clause declares a checked exception — it carries no
+ * runtime behavior on its own, but this artifact also ships an Error Prone {@code BugChecker}
+ * ({@link io.effectivejava.checker.RequireContextChecker}) that uses it to reject a build where a
+ * {@link #find} call, or a call to another {@code @Context}-annotated method, isn't covered by
+ * the caller's own {@code @Context} or an enclosing {@code bind(...).run(...)} block. The checker
+ * only activates for a consumer who opts into it by applying the {@code net.ltgt.errorprone}
+ * Gradle plugin to their own build — see the project README.
+ *
  * @see HandlerScope#open()
  * @see HandlerScope#find(Class)
+ * @see Context
+ * @see io.effectivejava.checker.RequireContextChecker
  */
 public final class HandlerScope {
 
@@ -54,6 +67,9 @@ public final class HandlerScope {
      * dispatches to the handler's partition thread determined by the router supplied to
      * {@link Builder#bind}. Void methods are fire-and-forget; non-void methods block until
      * the result is returned.
+     *
+     * <p>Callers should declare {@code effectType} in an {@link Context @Context} annotation on
+     * the enclosing method — see the class-level documentation.
      *
      * @param <T>        the effect interface type
      * @param effectType the interface class to look up
@@ -93,6 +109,11 @@ public final class HandlerScope {
      */
     @FunctionalInterface
     public interface ThrowingRunnable {
+        /**
+         * Runs the body.
+         *
+         * @throws Exception any exception the body needs to propagate
+         */
         void run() throws Exception;
     }
 
@@ -113,6 +134,10 @@ public final class HandlerScope {
         /**
          * Registers a handler using {@link HandlerScope#FIRST_ARGUMENT_HASH} routing,
          * two partitions, and a buffer of 1024.
+         *
+         * <p><strong>Note:</strong> {@code factory} runs before this scope's {@link
+         * HandlerScope#find} binding is established, so a factory that itself calls {@link
+         * HandlerScope#find} will always throw {@link IllegalStateException}.
          *
          * @param <T>        the effect interface type
          * @param effectType the interface to proxy
@@ -180,7 +205,9 @@ public final class HandlerScope {
             Throwable bodyException = null;
             try {
                 for (Entry<?> e : entries) {
-                    launch(e, handles, map);
+                    var handle = startProxxy(e);
+                    handles.add(handle);
+                    map.put(e.effectType(), handle.proxy());
                 }
 
                 ScopedValue.where(SCOPE, Collections.unmodifiableMap(map)).call(() -> {
@@ -208,10 +235,13 @@ public final class HandlerScope {
             if (bodyException instanceof Exception ex) throw ex;
         }
 
-        private static <T> void launch(Entry<T> e, List<Proxxy.ProxyHandle<?>> handles, Map<Class<?>, Object> map) {
-            var handle = Proxxy.start(e.effectType(), e.factory(), e.partitionCount(), e.bufferSize(), e.router());
-            handles.add(handle);
-            map.put(e.effectType(), handle.proxy());
+        private static <T> Proxxy.ProxyHandle<T> startProxxy(Entry<T> entry) {
+            return Proxxy.start(
+                    entry.effectType(),
+                    entry.factory(),
+                    entry.partitionCount(),
+                    entry.bufferSize(),
+                    entry.router());
         }
     }
 
