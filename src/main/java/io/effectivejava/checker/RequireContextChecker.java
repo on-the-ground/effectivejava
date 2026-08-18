@@ -16,6 +16,7 @@ import com.google.errorprone.util.MoreAnnotations;
 import com.sun.source.tree.ExpressionTree;
 import com.sun.source.tree.LambdaExpressionTree;
 import com.sun.source.tree.MemberSelectTree;
+import com.sun.source.tree.MemberReferenceTree;
 import com.sun.source.tree.MethodInvocationTree;
 import com.sun.source.tree.MethodTree;
 import com.sun.source.tree.Tree;
@@ -38,6 +39,12 @@ import java.util.Set;
  * applying the same rule uniformly to {@code find()} calls and to calls to other
  * {@code @Context}-annotated methods.
  *
+ * <p>Handler context is scoped to the current dynamic execution and is not propagated to
+ * arbitrary asynchronous work. When walking outward from a call site, this checker therefore
+ * stops at any lambda other than the directly enclosing {@code HandlerScope.run} body. This is
+ * intentionally conservative: even a callback that happens to execute immediately on the same
+ * thread is rejected when that fact cannot be proven locally.
+ *
  * <p>This class ships inside the {@code effectivejava} artifact itself (its {@code
  * error_prone_core} dependency is {@code compileOnly}, so it adds nothing to a normal consumer's
  * runtime or transitive dependencies). It only runs for a consumer who opts in by applying the
@@ -48,7 +55,8 @@ import java.util.Set;
         name = "RequireContext",
         summary = "HandlerScope effect used without a matching @Context declaration or bind() block",
         severity = SeverityLevel.ERROR)
-public final class RequireContextChecker extends BugChecker implements BugChecker.MethodInvocationTreeMatcher {
+public final class RequireContextChecker extends BugChecker
+        implements BugChecker.MethodInvocationTreeMatcher, BugChecker.MemberReferenceTreeMatcher {
 
     /** Instantiated by Error Prone's {@code ServiceLoader} discovery; not called directly. */
     public RequireContextChecker() {}
@@ -87,16 +95,59 @@ public final class RequireContextChecker extends BugChecker implements BugChecke
         return checkRequired(tree, state, required);
     }
 
+    @Override
+    public Description matchMemberReference(MemberReferenceTree tree, VisitorState state) {
+        Symbol.MethodSymbol sym = ASTHelpers.getSymbol(tree);
+        if (sym == null) {
+            return Description.NO_MATCH;
+        }
+
+        if (sym.owner.getQualifiedName().contentEquals(HANDLER_SCOPE)
+                && sym.getSimpleName().contentEquals("find")) {
+            return buildDescription(tree)
+                    .setMessage(
+                            "HandlerScope::find is not supported because a method reference can "
+                                    + "escape the current HandlerScope. Call HandlerScope.find(X.class) "
+                                    + "directly in a context the checker can verify.")
+                    .build();
+        }
+
+        ImmutableList<Type> required = contextAnnotationTypes(sym);
+        if (required.isEmpty()) {
+            return Description.NO_MATCH;
+        }
+        String names = required.stream().map(t -> t.tsym.getSimpleName().toString()).collect(joining(", "));
+        return buildDescription(tree)
+                .setMessage(
+                        "A method requiring @Context("
+                                + names
+                                + ") cannot be used as a method reference because it can escape "
+                                + "the current HandlerScope. Invoke the method directly in a context "
+                                + "the checker can verify.")
+                .build();
+    }
+
     private Description checkRequired(MethodInvocationTree tree, VisitorState state, ImmutableList<Type> required) {
-        Set<Type> covered = coveredTypes(state);
+        Coverage coverage = coveredTypes(state);
         ImmutableList<Type> missing =
                 required.stream()
-                        .filter(t -> covered.stream().noneMatch(c -> ASTHelpers.isSameType(c, t, state)))
+                        .filter(t -> coverage.types().stream().noneMatch(c -> ASTHelpers.isSameType(c, t, state)))
                         .collect(ImmutableList.toImmutableList());
         if (missing.isEmpty()) {
             return Description.NO_MATCH;
         }
         String names = missing.stream().map(t -> t.tsym.getSimpleName().toString()).collect(joining(", "));
+        if (coverage.crossedUnknownLambda()) {
+            return buildDescription(tree)
+                    .setMessage(
+                            "This call requires "
+                                    + names
+                                    + " across a lambda boundary whose execution context cannot be verified. "
+                                    + "HandlerScope context is not propagated to asynchronous work; bind the "
+                                    + "effect in a HandlerScope.run(...) inside this lambda, or move the call "
+                                    + "into the directly enclosing run body.")
+                    .build();
+        }
         return buildDescription(tree)
                 .setMessage(
                         "This call requires @Context("
@@ -109,7 +160,7 @@ public final class RequireContextChecker extends BugChecker implements BugChecke
     }
 
     /** Walks outward from the call site collecting discharged effects, stopping at the enclosing method. */
-    private Set<Type> coveredTypes(VisitorState state) {
+    private Coverage coveredTypes(VisitorState state) {
         Set<Type> covered = new LinkedHashSet<>();
         TreePath path = state.getPath().getParentPath();
         while (path != null) {
@@ -124,9 +175,12 @@ public final class RequireContextChecker extends BugChecker implements BugChecke
                         if (methodSelect instanceof MemberSelectTree) {
                             ExpressionTree receiver = ((MemberSelectTree) methodSelect).getExpression();
                             dischargeChain(receiver, state).ifPresent(covered::addAll);
+                            path = path.getParentPath();
+                            continue;
                         }
                     }
                 }
+                return new Coverage(covered, true);
             } else if (node instanceof MethodTree) {
                 Symbol.MethodSymbol enclosing = ASTHelpers.getSymbol((MethodTree) node);
                 if (enclosing != null) {
@@ -136,8 +190,10 @@ public final class RequireContextChecker extends BugChecker implements BugChecke
             }
             path = path.getParentPath();
         }
-        return covered;
+        return new Coverage(covered, false);
     }
+
+    private record Coverage(Set<Type> types, boolean crossedUnknownLambda) {}
 
     /**
      * Recognizes only a literal, inline {@code HandlerScope.open().bind(A.class,...).bind(B.class,...)}

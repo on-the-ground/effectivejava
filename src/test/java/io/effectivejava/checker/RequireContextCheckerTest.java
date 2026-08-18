@@ -63,6 +63,104 @@ class RequireContextCheckerTest {
     }
 
     @Test
+    void find_inside_unknown_nested_lambda_does_not_inherit_run_binding() {
+        helper.addSourceLines(
+                        "Test.java",
+                        "import io.effectivejava.HandlerScope;",
+                        "class Test {",
+                        "  interface Logger { void log(String k, String m); }",
+                        "  void submit(Runnable task) {}",
+                        "  void m() throws Exception {",
+                        "    HandlerScope.open()",
+                        "        .bind(Logger.class, () -> (k, msg) -> {})",
+                        "        .run(() -> {",
+                        "          submit(() -> {",
+                        "            // BUG: Diagnostic contains: across a lambda boundary",
+                        "            HandlerScope.find(Logger.class);",
+                        "          });",
+                        "        });",
+                        "  }",
+                        "}")
+                .doTest();
+    }
+
+    @Test
+    void run_started_inside_unknown_lambda_provides_its_own_binding() {
+        helper.addSourceLines(
+                        "Test.java",
+                        "import io.effectivejava.HandlerScope;",
+                        "class Test {",
+                        "  interface Logger { void log(String k, String m); }",
+                        "  void submit(Runnable task) {}",
+                        "  void m() {",
+                        "    submit(() -> {",
+                        "      try {",
+                        "        HandlerScope.open()",
+                        "            .bind(Logger.class, () -> (k, msg) -> {})",
+                        "            .run(() -> HandlerScope.find(Logger.class));",
+                        "      } catch (Exception e) {",
+                        "        throw new RuntimeException(e);",
+                        "      }",
+                        "    });",
+                        "  }",
+                        "}")
+                .doTest();
+    }
+
+    @Test
+    void enclosing_context_does_not_cross_unknown_lambda() {
+        helper.addSourceLines(
+                        "Test.java",
+                        "import io.effectivejava.Context;",
+                        "import io.effectivejava.HandlerScope;",
+                        "class Test {",
+                        "  interface Logger { void log(String k, String m); }",
+                        "  void submit(Runnable task) {}",
+                        "  @Context(Logger.class)",
+                        "  void m() {",
+                        "    submit(() -> {",
+                        "      // BUG: Diagnostic contains: across a lambda boundary",
+                        "      HandlerScope.find(Logger.class);",
+                        "    });",
+                        "  }",
+                        "}")
+                .doTest();
+    }
+
+    @Test
+    void context_method_reference_errors() {
+        helper.addSourceLines(
+                        "Test.java",
+                        "import io.effectivejava.Context;",
+                        "class Test {",
+                        "  interface Logger { void log(String k, String m); }",
+                        "  @Context(Logger.class)",
+                        "  void helper() {}",
+                        "  void m() {",
+                        "    // BUG: Diagnostic contains: cannot be used as a method reference",
+                        "    Runnable task = this::helper;",
+                        "  }",
+                        "}")
+                .doTest();
+    }
+
+    @Test
+    void find_method_reference_errors() {
+        helper.addSourceLines(
+                        "Test.java",
+                        "import io.effectivejava.HandlerScope;",
+                        "import java.util.function.Function;",
+                        "class Test {",
+                        "  interface Logger { void log(String k, String m); }",
+                        "  void m() {",
+                        "    // BUG: Diagnostic contains: HandlerScope::find is not supported",
+                        "    Function<Class<Logger>, Logger> finder = HandlerScope::find;",
+                        "  }",
+                        "}")
+                .doTest();
+    }
+
+    @Test
     void call_to_context_annotated_helper_without_context_errors() {
         helper.addSourceLines(
                         "Test.java",

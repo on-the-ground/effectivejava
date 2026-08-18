@@ -17,7 +17,7 @@ This library implements that model using Java's `ScopedValue` (ambient context p
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("io.github.joohyung-park:effectivejava:0.5.0")
+    implementation("io.github.joohyung-park:effectivejava:0.5.1")
 }
 ```
 
@@ -81,6 +81,29 @@ HandlerScope.open()
     });
 ```
 
+### Nested scopes
+
+Nested scopes inherit handlers from their enclosing scope. Binding the same effect type again
+temporarily shadows the enclosing handler; the enclosing binding becomes visible again when the
+nested scope exits, including when it exits with an exception. Each scope closes only the handlers
+it started itself.
+
+```java
+HandlerScope.open()
+    .bind(Logger.class, OuterLogger::new)
+    .run(() -> {
+        HandlerScope.open()
+            .bind(Greeter.class, MyGreeter::new)
+            .bind(Logger.class, InnerLogger::new)
+            .run(() -> {
+                HandlerScope.find(Greeter.class); // handler from the nested scope
+                HandlerScope.find(Logger.class);  // InnerLogger shadows OuterLogger
+            });
+
+        HandlerScope.find(Logger.class);          // OuterLogger is visible again
+    });
+```
+
 ### Custom router
 
 By default, calls are routed by the first argument's hash code (`BY_FIRST_ARG`). Supply an explicit router for finer control.
@@ -131,6 +154,13 @@ void greetLoudly(String name) {
 
 The checker only recognizes inline, literal `bind(...).run(...)` chains as discharging a requirement — a builder stored in a variable, built conditionally, or invoked via a method reference won't be credited, and the checker will conservatively ask for an explicit `@Context` instead. This is intentional: it can be overly strict, but it never silently lets an uncovered effect through.
 
+Handler context does not propagate to arbitrary threads, executors, or asynchronous continuations.
+Accordingly, the checker stops inheriting an enclosing `@Context` or `bind(...).run(...)` when it
+crosses a lambda other than the directly enclosing `run` body. This also conservatively rejects
+some immediately executed, same-thread callbacks because their execution context cannot be proven
+locally. An asynchronous callback can establish its own independent scope with an inline
+`HandlerScope.open().bind(...).run(...)` chain.
+
 #### Enabling the checker
 
 The checker's `error_prone_core` dependency is `compileOnly`, so depending on `effectivejava` normally pulls in none of it — using `@Context` without enabling the checker is valid, it's just inert documentation at that point. To actually enforce it, apply the [`net.ltgt.errorprone`](https://plugins.gradle.org/plugin/net.ltgt.errorprone) Gradle plugin to *your own* build and add this same artifact to the `errorprone` configuration:
@@ -142,8 +172,8 @@ plugins {
 }
 
 dependencies {
-    implementation("io.github.joohyung-park:effectivejava:0.5.0")
-    errorprone("io.github.joohyung-park:effectivejava:0.5.0")
+    implementation("io.github.joohyung-park:effectivejava:0.5.1")
+    errorprone("io.github.joohyung-park:effectivejava:0.5.1")
 }
 ```
 
@@ -158,9 +188,34 @@ HandlerScope.open()
         body executes                    ← find() returns the proxy; calls routed by router
                                          ← same routing key → same thread → same target instance
     ← body exits (normal or exception)  ← all proxies closed
-                                         ← pending non-void calls complete before shutdown
-                                         ← run() returns only after all handlers finish
+                                         ← all accepted calls, including queued void calls,
+                                           are drained before shutdown
+                                         ← run() returns only after all accepted calls finish
 ```
+
+Void methods are fire-and-forget per invocation: the caller does not wait for the handler to
+execute. They are not fire-and-forget with respect to the scope lifecycle. Once a call has been
+accepted, `run()` waits for it to execute before returning, including when `body` throws.
+
+This guarantee assumes calls do not escape the structured lifetime of `body`. If another thread
+is still invoking a proxy while `body` exits, that invocation races with shutdown and is not
+guaranteed to be accepted. Join or otherwise finish such work before leaving the scope.
+
+## Known limitations
+
+- Binding the same effect type more than once on a single builder is not rejected. All of the
+  handlers are started, but only the last proxy is discoverable. Treat duplicate bindings within
+  one builder as unsupported; shadowing the same type in a nested scope is supported.
+- Handler implementations execute on Proxxy daemon threads and do not inherit the caller's
+  `HandlerScope`. A handler implementation must not call `HandlerScope.find(...)` to perform
+  another effect.
+- `@Context` targets methods only. Constructors and initializer blocks cannot declare an effect
+  requirement and should not call `HandlerScope.find(...)`.
+- An exception thrown by a void handler is reported to the daemon thread's
+  `UncaughtExceptionHandler`; it is not propagated from the original call or collected by
+  `HandlerScope.run()`.
+- `@Context` enforcement is opt-in. Without the Error Prone checker configuration described
+  above, the annotation is documentation and missing context is detected only when `find()` runs.
 
 ## License
 

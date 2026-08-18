@@ -30,15 +30,13 @@ class HandlerScopeTest {
     @Test
     void fire_and_forget_handler_receives_messages() throws Exception {
         List<String> received = new CopyOnWriteArrayList<>();
-        CountDownLatch latch = new CountDownLatch(2);
 
         HandlerScope.open()
-                .bind(Logger.class, () -> (key, msg) -> { received.add(msg); latch.countDown(); })
+                .bind(Logger.class, () -> (key, msg) -> received.add(msg))
                 .run(() -> {
                     Logger log = HandlerScope.find(Logger.class);
                     log.log("alice", "hello");
                     log.log("alice", "world");
-                    latch.await();
                 });
 
         assertEquals(List.of("hello", "world"), received);
@@ -76,6 +74,48 @@ class HandlerScopeTest {
         assertEquals(List.of("alice"), greetees);
     }
 
+    @Test
+    void nested_scope_inherits_outer_handlers_and_adds_its_own() throws Exception {
+        HandlerScope.open()
+                .bind(Logger.class, () -> (key, msg) -> {})
+                .run(() -> HandlerScope.open()
+                        .bind(Greeter.class, () -> (key, name) -> "Hello, " + name)
+                        .run(() -> {
+                            assertNotNull(HandlerScope.find(Logger.class));
+                            assertEquals("Hello, Alice",
+                                    HandlerScope.find(Greeter.class).greet("key", "Alice"));
+                        }));
+    }
+
+    @Test
+    void nested_binding_shadows_outer_binding_until_nested_scope_exits() throws Exception {
+        HandlerScope.open()
+                .bind(Greeter.class, () -> (key, name) -> "outer")
+                .run(() -> {
+                    assertEquals("outer", HandlerScope.find(Greeter.class).greet("key", "Alice"));
+
+                    HandlerScope.open()
+                            .bind(Greeter.class, () -> (key, name) -> "inner")
+                            .run(() -> assertEquals("inner",
+                                    HandlerScope.find(Greeter.class).greet("key", "Alice")));
+
+                    assertEquals("outer", HandlerScope.find(Greeter.class).greet("key", "Alice"));
+                });
+    }
+
+    @Test
+    void outer_bindings_are_restored_when_nested_scope_throws() throws Exception {
+        HandlerScope.open()
+                .bind(Greeter.class, () -> (key, name) -> "outer")
+                .run(() -> {
+                    assertThrows(RuntimeException.class, () -> HandlerScope.open()
+                            .bind(Greeter.class, () -> (key, name) -> "inner")
+                            .run(() -> { throw new RuntimeException("boom"); }));
+
+                    assertEquals("outer", HandlerScope.find(Greeter.class).greet("key", "Alice"));
+                });
+    }
+
     // ── Edge cases ────────────────────────────────────────────────────────────
 
     @Test
@@ -88,14 +128,12 @@ class HandlerScopeTest {
     @Test
     void scope_tears_down_even_when_body_throws() {
         List<String> received = new CopyOnWriteArrayList<>();
-        CountDownLatch latch = new CountDownLatch(1);
 
         assertThrows(RuntimeException.class, () ->
                 HandlerScope.open()
-                        .bind(Logger.class, () -> (key, msg) -> { received.add(msg); latch.countDown(); })
+                        .bind(Logger.class, () -> (key, msg) -> received.add(msg))
                         .run(() -> {
                             HandlerScope.find(Logger.class).log("x", "before-throw");
-                            latch.await();
                             throw new RuntimeException("boom");
                         }));
 

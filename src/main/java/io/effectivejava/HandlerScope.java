@@ -14,6 +14,8 @@ import java.util.function.ToIntBiFunction;
  * call stack via {@link #find}, without threading explicit parameters through every layer.
  * Each handler runs as a partitioned virtual-thread actor backed by {@link Proxxy}; the scope
  * tears everything down automatically when the body exits.
+ * Nested scopes inherit handlers from their enclosing scope. Binding the same effect type in a
+ * nested scope temporarily shadows the enclosing handler until the nested scope exits.
  *
  * <p><strong>Fail-loud contract:</strong> {@link #find} throws {@link IllegalStateException}
  * if no handler is bound for the given effect type. A missing handler is always a programming
@@ -135,9 +137,9 @@ public final class HandlerScope {
          * Registers a handler using {@link HandlerScope#FIRST_ARGUMENT_HASH} routing,
          * two partitions, and a buffer of 1024.
          *
-         * <p><strong>Note:</strong> {@code factory} runs before this scope's {@link
-         * HandlerScope#find} binding is established, so a factory that itself calls {@link
-         * HandlerScope#find} will always throw {@link IllegalStateException}.
+         * <p><strong>Note:</strong> {@code factory} runs before this scope's bindings are
+         * established. In a nested scope it can therefore see only handlers inherited from an
+         * enclosing scope, not handlers registered on this builder.
          *
          * @param <T>        the effect interface type
          * @param effectType the interface to proxy
@@ -187,8 +189,16 @@ public final class HandlerScope {
          * Starts all registered handlers, executes {@code body} with them discoverable via
          * {@link HandlerScope#find}, then tears down the scope.
          *
-         * <p>On exit (normal or exceptional), each handler's daemon is closed. Pending non-void
-         * calls complete before shutdown; queued void calls may be dropped.
+         * <p>A nested scope inherits all handlers from its enclosing scope. A handler registered
+         * on this builder shadows an inherited handler of the same effect type for the duration
+         * of {@code body}. On exit, only handlers started by this builder are closed and the
+         * enclosing bindings become visible again.
+         *
+         * <p>On exit (normal or exceptional), each handler's daemon is closed gracefully.
+         * Invocations accepted before shutdown, including queued void invocations, are drained
+         * and executed before {@code run} completes. Calls racing with shutdown from threads
+         * whose lifetime escapes {@code body} are not covered by this guarantee; callers must
+         * ensure such in-flight calls have returned before {@code body} exits.
          *
          * @param body the block to execute inside the scope
          * @throws Exception any exception thrown by {@code body}
@@ -200,6 +210,9 @@ public final class HandlerScope {
             }
 
             Map<Class<?>, Object> map = new IdentityHashMap<>();
+            if (SCOPE.isBound()) {
+                map.putAll(SCOPE.get());
+            }
             List<Proxxy.ProxyHandle<?>> handles = new ArrayList<>(entries.size());
 
             Throwable bodyException = null;

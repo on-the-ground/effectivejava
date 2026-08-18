@@ -7,7 +7,7 @@ plugins {
 }
 
 group = "io.github.joohyung-park"
-version = "0.5.0"
+version = "0.5.1"
 
 java {
     toolchain {
@@ -51,7 +51,7 @@ val errorProneExportArgs = errorProneExports.map { "--add-exports=$it=ALL-UNNAME
 val errorProneOpenArgs = errorProneOpens.map { "--add-opens=$it=ALL-UNNAMED" }
 
 dependencies {
-    implementation("io.github.joohyung-park:proxxy:0.2.1")
+    implementation("io.github.joohyung-park:proxxy:0.2.3")
     compileOnly("com.google.errorprone:error_prone_core:$errorProneVersion")
 
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
