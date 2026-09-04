@@ -1,3 +1,5 @@
+<img width="278" height="400" alt="Thumbsup1(1)" src="https://github.com/user-attachments/assets/7e29d6b3-d31d-4d51-823a-7c6f663333a5" />
+
 # Effect-ive Java
 
 Algebraic Effect Handlers for Java — bind effect handlers to a dynamic scope so they are discoverable from anywhere in the call stack, without threading explicit parameters through every layer.
